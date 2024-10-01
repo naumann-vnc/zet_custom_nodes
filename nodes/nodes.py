@@ -42,8 +42,8 @@ def closest_aspect_ratio(aspect_ratio):
     return closest_ratio
 
 
-# Function to resize image to fit closest aspect ratio
-def resize_image_to_aspect_ratio(image: np.ndarray, width: int, height: int, closest_ratio, max_resolution=None):
+# Function to resize an image using OpenCV
+def resize_image_to_aspect_ratio(image: np.ndarray, width: int, height: int, closest_ratio):
     closest_width_ratio, closest_height_ratio = closest_ratio
 
     # Decide whether to adjust width or height to match the closest aspect ratio
@@ -56,26 +56,14 @@ def resize_image_to_aspect_ratio(image: np.ndarray, width: int, height: int, clo
         new_width = width
         new_height = int((closest_height_ratio / closest_width_ratio) * new_width)
 
-    # Calculate total resolution (pixels)
-    total_pixels = new_width * new_height
-
-    # If a max_resolution is defined, and the current resolution exceeds it, adjust the size
-    if max_resolution and total_pixels > max_resolution:
-        # Calculate the scaling factor to reduce resolution to within max_resolution
-        scaling_factor = (max_resolution / total_pixels) ** 0.5
-        new_width = int(new_width * scaling_factor)
-        new_height = int(new_height * scaling_factor)
-
-    # Resize the image using OpenCV's resize function with high-quality resampling
+    # Resize the image using OpenCV's resize function
     resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
 
     return resized_image
 
 
 # Function to crop the image to fit the closest aspect ratio
-def crop_image_to_aspect_ratio(
-    image: np.ndarray, width: int, height: int, closest_ratio
-):
+def crop_image_to_aspect_ratio(image: np.ndarray, width: int, height: int, closest_ratio):
     closest_width_ratio, closest_height_ratio = closest_ratio
 
     # Calculate the target aspect ratio width and height
@@ -86,16 +74,35 @@ def crop_image_to_aspect_ratio(
         # Crop width, keeping the height
         new_width = int(target_aspect_ratio * height)
         crop_x = (width - new_width) // 2  # Calculate the x offset for center cropping
-        cropped_image = image[:, crop_x : crop_x + new_width]
+        cropped_image = image[:, crop_x:crop_x + new_width]
     else:
         # Crop height, keeping the width
         new_height = int(width / target_aspect_ratio)
-        crop_y = (
-            height - new_height
-        ) // 2  # Calculate the y offset for center cropping
-        cropped_image = image[crop_y : crop_y + new_height, :]
+        crop_y = (height - new_height) // 2  # Calculate the y offset for center cropping
+        cropped_image = image[crop_y:crop_y + new_height, :]
 
     return cropped_image
+
+
+# Function to ensure the image resolution does not exceed the max_resolution
+def limit_resolution(image: np.ndarray, max_resolution: int):
+    height, width = image.shape[:2]
+
+    # If both dimensions are within the limit, return the image as is
+    if max(width, height) <= max_resolution:
+        return image
+
+    # Calculate the scaling factor to reduce the image size
+    scaling_factor = max_resolution / max(width, height)
+    new_width = int(width * scaling_factor)
+    new_height = int(height * scaling_factor)
+
+    # Resize the image using OpenCV's resize function
+    resized_image = cv2.resize(
+        image, (new_width, new_height), interpolation=cv2.INTER_AREA
+    )
+
+    return resized_image
 
 
 class ResizeImageTargetingAspectRatio:
@@ -105,7 +112,7 @@ class ResizeImageTargetingAspectRatio:
             "required": {
                 "image": ("IMAGE",),
                 "crop": ("BOOLEAN",),
-                "max_resolution": ("INT", {"default": 0, "min": 0, "step": 128})
+                "max_resolution": ("INT", {"default": 0, "min": 0, "step": 128}),
             }
         }
 
@@ -114,7 +121,7 @@ class ResizeImageTargetingAspectRatio:
     FUNCTION = "resize_image_targeting_aspect_ratio"
     CATEGORY = "image/nedzet-nodes"
 
-    def resize_image_targeting_aspect_ratio(self, image: torch.Tensor, crop: bool, max_resolution:int):
+    def resize_image_targeting_aspect_ratio(self, image: torch.Tensor, crop: bool, max_resolution: int):
         # Get the width and height from the image object
         batch_size, height, width, _ = image.shape
 
@@ -129,7 +136,7 @@ class ResizeImageTargetingAspectRatio:
             closest_ratio = closest_aspect_ratio(image_aspect_ratio)
 
         # Get the name of the closest common aspect ratio
-        #closest_ratio_name = common_aspect_ratios[closest_ratio]
+        # closest_ratio_name = common_aspect_ratios[closest_ratio]
 
         # Resize the image to the closest aspect ratio
         if crop:
@@ -137,12 +144,16 @@ class ResizeImageTargetingAspectRatio:
             resized_image = crop_image_to_aspect_ratio(
                 tensor_image, width, height, closest_ratio
             )
-            #print(f"Tutorial Text")
+            # print(f"Tutorial Text")
         else:
             # Resize the image to fit the closest aspect ratio
             resized_image = resize_image_to_aspect_ratio(
                 tensor_image, width, height, closest_ratio
             )
+
+        # Apply max_resolution if defined
+        if max_resolution is not None and max_resolution !=0:
+            resized_image = limit_resolution(resized_image, max_resolution)
 
         resized_image = torch.from_numpy(resized_image).unsqueeze(0)
 
