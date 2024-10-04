@@ -107,10 +107,10 @@ class ResizeImageTargetingAspectRatio:
             # Resize the image to the closest aspect ratio
             if crop:
                 # Crop the image to fit the closest aspect ratio
-                resized_image = crop_image_to_aspect_ratio(
+                cropped_image  = crop_image_to_aspect_ratio(
                     tensor_image, width, height, closest_ratio
                 )
-                # print(f"Tutorial Text")
+                resized_image = resize_image_to_target_resolution(cropped_image, target_resolution)
             else:
                 # Resize the image to fit the closest aspect ratio
                 resized_image = resize_image_to_target_resolution(
