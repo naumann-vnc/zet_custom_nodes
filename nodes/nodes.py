@@ -1,12 +1,12 @@
+import re
 import numpy as np
 import torch
 from math import gcd
 import cv2
-
-
-def pil2tensor(image):
-    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
-
+from scipy.ndimage import gaussian_filter
+from skimage.segmentation import watershed
+from scipy import ndimage as ndi
+import matplotlib.pyplot as plt
 
 # Target aspect ratios and corresponding resolutions
 target_resolutions = {
@@ -107,10 +107,12 @@ class ResizeImageTargetingAspectRatio:
             # Resize the image to the closest aspect ratio
             if crop:
                 # Crop the image to fit the closest aspect ratio
-                cropped_image  = crop_image_to_aspect_ratio(
+                cropped_image = crop_image_to_aspect_ratio(
                     tensor_image, width, height, closest_ratio
                 )
-                resized_image = resize_image_to_target_resolution(cropped_image, target_resolution)
+                resized_image = resize_image_to_target_resolution(
+                    cropped_image, target_resolution
+                )
             else:
                 # Resize the image to fit the closest aspect ratio
                 resized_image = resize_image_to_target_resolution(
@@ -122,24 +124,156 @@ class ResizeImageTargetingAspectRatio:
         return (resized_image,)
 
 
-class PrintHelloWorld:
+class LaplacianFilter:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "smoothness": ("INT", {"default": 2, "min": 0, "max": 10}),
+                "min_threshold": (
+                    "FLOAT",
+                    {"default": 0.25, "min": 0.0, "max": 1, "step": 0.01},
+                ),
+                "max_threshold": (
+                    "FLOAT",
+                    {"default": 1, "min": 0.0, "max": 1, "step": 0.01},
+                ),
+                "absolute_value": ("BOOLEAN",),
+                "negative_colors": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    # RETURN_NAMES = ("IMAGE",)
+    FUNCTION = "apply_laplacian_filter"
+    CATEGORY = "image/nedzet-nodes"
+
+    def apply_laplacian_filter(
+        self,
+        image: torch.Tensor,
+        smoothness: int,
+        min_threshold: float,
+        max_threshold: float,
+        absolute_value: bool,
+        negative_colors: bool,
+    ):
+
+        # Convert tensor to a numpy array with compatible type
+        image_np = (
+            image.squeeze().numpy().astype(np.float32) * 255
+        )  # Convert tensor to numpy and scale for OpenCV
+
+        # Apply Gaussian smoothing (smoothness)
+        if smoothness > 0:
+            image_np = gaussian_filter(image_np, sigma=smoothness)
+
+        # Apply Laplacian filter with proper format
+        laplacian_np = cv2.Laplacian(image_np, cv2.CV_32F, ksize=3)
+
+        # Apply absolute value if specified
+        if absolute_value:
+            laplacian_np = np.abs(laplacian_np)
+
+        # Normalize Laplacian output to range 0-1
+        laplacian_normalized = cv2.normalize(laplacian_np, None, 0, 1, cv2.NORM_MINMAX)
+
+        # Apply min and max thresholds
+        laplacian_normalized = np.clip(
+            laplacian_normalized, min_threshold, max_threshold
+        )
+
+        # Rescale to 0-1 based on thresholds
+        laplacian_normalized = (laplacian_normalized - min_threshold) / (
+            max_threshold - min_threshold
+        )
+        laplacian_normalized = np.clip(laplacian_normalized, 0, 1)
+
+        # Invert colors if specified
+        if negative_colors:
+            laplacian_normalized = 1 - laplacian_normalized
+
+        # Convert back to tensor
+        laplacian_tensor = torch.tensor(
+            laplacian_normalized, dtype=torch.float32
+        ).unsqueeze(
+            0
+        )  # Convert back to tensor
+
+        return (laplacian_tensor,)
+
+
+class BlendMaskBatch:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "mask_batch": ("MASK",),
+                "target_mask": ("MASK",),
+                "operation": (["add", "subtract"],),
+            }
+        }
+
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "combine_and_subtract_masks"
+    CATEGORY = "image/nedzet-nodes"
+
+    def combine_and_subtract_masks(self, mask_batch, target_mask, operation):
+        # Sum all the masks in the batch
+        if mask_batch.ndim > 2:
+            summed_mask = torch.sum(mask_batch, dim=0)
+        else:
+            summed_mask = torch.clamp(
+                torch.sum(mask_batch.unsqueeze(1), dim=0), 0, 255
+            ).squeeze(1)
+
+        # Apply the specified operation with the regular mask and summed mask
+        if operation == "add":
+            if target_mask.ndim > 2:
+                result_mask = target_mask + summed_mask
+            else:
+                result_mask = torch.clamp(
+                    target_mask.unsqueeze(1) + summed_mask, 0, 255
+                ).squeeze(1)
+        elif operation == "subtract":
+            if target_mask.ndim > 2:
+                result_mask = target_mask - summed_mask
+            else:
+                result_mask = torch.clamp(
+                    target_mask.unsqueeze(1) - summed_mask, 0, 255
+                ).squeeze(1)
+        else:
+            raise ValueError("Invalid operation. Use 'add' or 'subtract'.")
+
+        return (result_mask,)
+
+
+class TagBlacklist:
 
     @classmethod
     def INPUT_TYPES(cls):
 
         return {
             "required": {
-                "text": ("STRING", {"multiline": False, "default": "Hello World"}),
+                "text": ("STRING", {"default": "", "multiline": False}),
+                "words_to_remove": ("STRING", {"default": "", "multiline": False}),
             }
         }
 
-    RETURN_TYPES = ()
-    FUNCTION = "print_text"
-    OUTPUT_NODE = True
-    CATEGORY = "🧩 Tutorial Nodes"
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "remove_words"
+    CATEGORY = "utils/nedzet-nodes"
 
-    def print_text(self, text):
+    def remove_words(self, text, words_to_remove):
+        # Escape any special regex characters in words to remove
+        words_pattern = "|".join(
+            re.escape(word.strip()) for word in words_to_remove.split(",")
+        )
 
-        print(f"Tutorial Text : {text}")
+        # Create regex to match each word or phrase, with optional leading commas or spaces
+        cleaned_text = re.sub(r",?\s*(" + words_pattern + r")", "", text).strip()
 
-        return {}
+        # Remove any leading/trailing commas or extra spaces that might remain
+        cleaned_text = re.sub(r"\s*,\s*", ", ", cleaned_text).strip(", ")
+
+        return (cleaned_text,)

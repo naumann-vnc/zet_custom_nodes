@@ -1,7 +1,11 @@
 from .nodes.nodes import *
 
 NODE_CLASS_MAPPINGS = { 
-        "Print Hello World": PrintHelloWorld,
+        "Laplacian": LaplacianFilter,
+        "Tag blacklist": TagBlacklist,
+        #"G'MIC Segmentation": GMICSegmentation,
+        #"G'MIC Easy Skin Retouch": GMICEasySkinRetouch,
+        "Blend Mask Batch": BlendMaskBatch,
         "Resize Image Targeting Aspect Ratio": ResizeImageTargetingAspectRatio
     }
     
