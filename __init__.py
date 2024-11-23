@@ -3,7 +3,7 @@ from .nodes.nodes import *
 NODE_CLASS_MAPPINGS = { 
         "Laplacian": LaplacianFilter,
         "Tag blacklist": TagBlacklist,
-        #"G'MIC Segmentation": GMICSegmentation,
+        "Hierarchical Merging of Region Boundary Region Adjacency Graphs": HierarchicalMergingofRegionBoundaryRAGs,
         #"G'MIC Easy Skin Retouch": GMICEasySkinRetouch,
         "Blend Mask Batch": BlendMaskBatch,
         "Resize Image Targeting Aspect Ratio": ResizeImageTargetingAspectRatio
