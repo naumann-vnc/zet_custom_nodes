@@ -4,7 +4,9 @@ import torch
 from math import gcd
 import cv2
 from scipy.ndimage import gaussian_filter
-from skimage import graph, segmentation, filters, color, filters
+from skimage import graph, segmentation, filters, color
+from torchvision import transforms
+from PIL import Image
 
 # Target aspect ratios and corresponding resolutions
 target_resolutions = {
@@ -338,12 +340,18 @@ class HierarchicalMergingofRegionBoundaryRAGs:
             }
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = (
+        "IMAGE",
+        "INT",
+    )
     # RETURN_NAMES = ("IMAGE",)
     FUNCTION = "merge_image"
     CATEGORY = "image/nedzet-nodes"
 
-    def merge_image(self, image: torch.Tensor, compactness: int, n_segments: int, threshold: float):
+    def merge_image(
+        self, image: torch.Tensor, compactness: int, n_segments: int, threshold: float
+    ):
+        num_segments_per_image = []
 
         for img in image:  # Process each image in the batch
             img_np = img.cpu().numpy()
@@ -355,6 +363,13 @@ class HierarchicalMergingofRegionBoundaryRAGs:
             labels = segmentation.slic(
                 img_np, compactness=compactness, n_segments=n_segments, start_label=1
             )
+
+            # Get the unique segment labels
+            unique_labels = np.unique(labels)
+            num_segments = len(unique_labels)
+
+            # Store the number of segments
+            num_segments_per_image.append(num_segments)
 
             # Create the Region Adjacency Graph (RAG) using boundary weights
             g = graph.rag_boundary(labels, edges)
@@ -374,4 +389,180 @@ class HierarchicalMergingofRegionBoundaryRAGs:
             out = color.label2rgb(labels2, img_np, kind="avg", bg_label=0)
 
         torch_out = torch.from_numpy(out).unsqueeze(0)
-        return (torch_out,)
+        return (
+            torch_out,
+            num_segments_per_image,
+        )
+
+
+class MergeImages:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "destination_image": ("IMAGE",),
+                "pasted_image": ("IMAGE",),
+                "x": (
+                    "INT",
+                    {
+                        "default": 0,
+                    },
+                ),
+                "y": (
+                    "INT",
+                    {
+                        "default": 0,
+                    },
+                ),
+                "anchor": (
+                    ["top-right", "top-left", "bottom-left", "bottom-right", "center"],
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    # RETURN_NAMES = ("IMAGE",)
+    FUNCTION = "merge_images"
+    CATEGORY = "image/nedzet-nodes"
+
+    def merge_images(
+        self,
+        destination_image: torch.Tensor,
+        pasted_image: torch.Tensor,
+        x: int,
+        y: int,
+        anchor: str,
+    ):
+
+        batch_size, height, width, channels = pasted_image.shape
+
+        # Placeholder for results
+        result_batch = []
+
+        for b in range(batch_size):
+            # Convert tensors to numpy arrays for PIL compatibility
+            dest_np = (destination_image[b].cpu().numpy() * 255).astype("uint8")
+            pasted_np = (pasted_image[b].cpu().numpy() * 255).astype("uint8")
+
+            # Ensure the images are in RGBA mode (to support transparency)
+            pil_destination = Image.fromarray(dest_np, mode="RGBA" if channels == 4 else "RGB")
+            pil_pasted = Image.fromarray(pasted_np, mode="RGBA" if channels == 4 else "RGB")
+
+            # Get dimensions of the destination and pasted image
+            dest_width, dest_height = pil_destination.size
+            pasted_width, pasted_height = pil_pasted.size
+
+            # Adjust coordinates based on the anchor
+            if anchor == "top-right":
+                x -= pasted_width
+            elif anchor == "bottom-left":
+                y -= pasted_height
+            elif anchor == "bottom-right":
+                x -= pasted_width
+                y -= pasted_height
+            elif anchor == "center":
+                x = (dest_width - pasted_width) // 2
+                y = (dest_height - pasted_height) // 2
+
+            # Copy the destination image to avoid modifying the original
+            result_image = pil_destination.copy()
+
+            # Paste the image with the alpha channel as a mask
+            if pil_pasted.mode == "RGBA":
+                result_image.paste(pil_pasted, (x, y), pil_pasted.split()[-1])  # Use alpha as mask
+            else:
+                result_image.paste(pil_pasted, (x, y))
+
+            # Convert back to a tensor, ensuring that the alpha channel is preserved
+            result_np = np.array(result_image)
+            result_tensor = torch.from_numpy(result_np).float() / 255.0  # Normalize to [0, 1]
+
+            # Ensure the tensor shape is [H, W, C]
+            result_batch.append(result_tensor)
+
+        # Stack all batch images into a single tensor with shape [B, H, W, C]
+        result_tensor = torch.stack(result_batch, dim=0)
+
+        return (result_tensor,)
+
+
+# Detection method from https://github.com/CHEREF-Mehdi/SkinDetection
+class SkinToneMask:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "tone_mode": (["average", "median"],),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE")  # (mask, skin_tone_image)
+    RETURN_NAMES = ("skin_mask", "skin_tone")
+    FUNCTION = "process"
+    CATEGORY = "Image/Mask"
+
+    def process(self, images: torch.Tensor, tone_mode: str):
+        device = images.device
+        images_np = images.detach().cpu().numpy()
+
+        # Normalize to [0,255] if needed
+        if images_np.max() <= 1.0:
+            images_np = (images_np * 255).astype(np.uint8)
+        else:
+            images_np = images_np.astype(np.uint8)
+
+        batch_masks = []
+        batch_tones = []
+
+        for img in images_np:
+            # Convert from RGB to BGR for OpenCV
+            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+            # --- HSV MASK ---
+            img_HSV = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+            HSV_mask = cv2.inRange(img_HSV, (0, 15, 0), (17, 170, 255))
+            HSV_mask = cv2.morphologyEx(HSV_mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+
+            # --- YCrCb MASK ---
+            img_YCrCb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb)
+            YCrCb_mask = cv2.inRange(img_YCrCb, (0, 135, 85), (255, 180, 135))
+            YCrCb_mask = cv2.morphologyEx(YCrCb_mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+
+            # --- Combined mask ---
+            global_mask = cv2.bitwise_and(YCrCb_mask, HSV_mask)
+            global_mask = cv2.medianBlur(global_mask, 3)
+            global_mask = cv2.morphologyEx(global_mask, cv2.MORPH_OPEN, np.ones((4,4), np.uint8))
+
+            # 3-channel mask for Comfy
+            mask_3ch = cv2.cvtColor(global_mask, cv2.COLOR_GRAY2RGB)
+            mask_tensor = torch.from_numpy(mask_3ch.astype(np.float32) / 255.0)
+
+            # ------------------------------------------------------
+            # SKIN TONE EXTRACTION
+            # ------------------------------------------------------
+            skin_pixels = img[global_mask > 0]  # extract (N,3) rgb pixels
+
+            if len(skin_pixels) == 0:
+                # No skin detected → return black
+                tone = np.array([0, 0, 0], dtype=np.uint8)
+            else:
+                if tone_mode == "median":
+                    tone = np.median(skin_pixels, axis=0).astype(np.uint8)
+                else:
+                    tone = np.mean(skin_pixels, axis=0).astype(np.uint8)
+
+            # Create a solid color image
+            H, W, C = img.shape
+            skin_tone_img = np.zeros((H, W, 3), dtype=np.uint8)
+            skin_tone_img[:] = tone  # fill with tone
+
+            tone_tensor = torch.from_numpy(skin_tone_img.astype(np.float32) / 255.0)
+
+            batch_masks.append(mask_tensor)
+            batch_tones.append(tone_tensor)
+
+        batch_masks = torch.stack(batch_masks).to(device)
+        batch_tones = torch.stack(batch_tones).to(device)
+
+        return (batch_masks, batch_tones)
